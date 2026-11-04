@@ -4,6 +4,8 @@ BotLogik is a lightweight macOS workspace for building apps and AI agents with C
 
 Current application version: **1.0.9**. This repository contains the standalone desktop application.
 
+![BotLogik workspace with project files, a code editor, and Claude and Codex session options.](docs/images/home-screen.png)
+
 ## Requirements
 
 - An Apple silicon Mac. Other platforms and Intel packaging are not validated.
