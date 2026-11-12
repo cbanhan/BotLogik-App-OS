@@ -1,3 +1,8 @@
+import { normalizeChatModel, validateChatModel, chatModelArgs, chatSwitchCommand, assertChatSwitchSession } from './chat-models.js';
+import { applyClaudeFocus } from './claude-presentation.js';
+import { createToolTraces } from './tool-traces.js';
+import { freshTerminalEnvironment } from './terminal-environment.js';
+import { resolveCli } from './cli-discovery.js';
 import { discoverClaudeModels, assertClaudeModelSupported } from './claude-models.js';
 import { stageImage, imagePrompt, imageBytes, MAX_IMAGES } from './image-attachments.js';
 import { createAgentWorkspace, duplicateAgentWorkspace } from './create-agent.js';
@@ -86,7 +91,7 @@ const TEXT_EXTENSIONS = new Set([
 ]);
 const STARTER_FILE_EXTENSIONS = new Set(['.md', '.markdown', '.txt', '.json', '.yaml', '.yml', '.toml']);
 const STARTER_FILE_NAMES = new Set(['CLAUDE.md', 'AGENTS.md', 'agent.md', 'README.md', 'CLAUDE', 'AGENTS', 'agent', 'README']);
-const MAX_FILE_PREVIEW_BYTES = 100 * 1024;
+const MAX_EDITOR_FILE_BYTES = 50 * 1024 * 1024;
 const MAX_AGENTS = 50;
 const CONFIG_DIR = join(homedir(), '.agent-logik');
 const CONFIG_PATH = join(CONFIG_DIR, 'config.json');
@@ -114,10 +119,26 @@ let agentWatcher = null;
 let agentWatchDebounce = null;
 const terminalSessions = new Map();
 const pendingManagedLaunches = new Set();
+const toolTraces = createToolTraces({ path: join(CONFIG_DIR, 'tool-traces.json'), onChange() {
+  for (const window of BrowserWindow.getAllWindows()) sendToWebContents(window.webContents, 'traces:changed', {});
+} });
 let activityBridge;
+const traceContexts = new Map();
 function getActivityBridge() {
   if (!activityBridge) activityBridge = createActivityBridge({
     directory: join(app.getPath('userData'), 'activity-hooks'),
+    onTrace(activity, event) {
+      const context = { agentId: activity.agentId, provider: activity.provider, id: activity.conversationId || activity.generation, conversationId: activity.conversationId };
+      const previous = traceContexts.get(activity.generation);
+      if (previous && previous.id !== context.id) void toolTraces.end(previous);
+      traceContexts.set(activity.generation, context);
+      if (event.hook_event_name === 'BotLogikSessionStarted') void toolTraces.begin(context, activity.detail);
+      else if (event.hook_event_name === 'BotLogikSessionClosed') {
+        void toolTraces.end(context);
+        traceContexts.delete(activity.generation);
+      }
+      else void toolTraces.event(context, event);
+    },
     onChange(activity) {
       const session = terminalSessions.get(activity.sessionId);
       if (session?.monitor?.activity.generation !== activity.generation) return;
@@ -203,6 +224,8 @@ async function readConfig() {
       agentStarterFiles: (config.agentStarterFiles && typeof config.agentStarterFiles === 'object' && !Array.isArray(config.agentStarterFiles)) ? config.agentStarterFiles : {},
       globalIgnoredNames: hasOnlyLegacyDefaultIgnoredNames(globalIgnoredNames) ? [] : globalIgnoredNames,
       chatContrast: normalizeChatContrast(config.chatContrast),
+      reduceToolClutter: config.reduceToolClutter === true,
+      chatModelDefaults: config.chatModelDefaults && typeof config.chatModelDefaults === 'object' && !Array.isArray(config.chatModelDefaults) ? config.chatModelDefaults : {},
       autoDiscoverEnabled: config.autoDiscoverEnabled === true
     };
   } catch {
@@ -219,6 +242,8 @@ async function readConfig() {
       agentStarterFiles: {},
       globalIgnoredNames: [...DEFAULT_GLOBAL_IGNORED_NAMES],
       chatContrast: null,
+      reduceToolClutter: false,
+      chatModelDefaults: {},
       autoDiscoverEnabled: false
     };
   }
@@ -258,7 +283,8 @@ async function getSettings() {
     defaultGlobalIgnoredNames: [...DEFAULT_GLOBAL_IGNORED_NAMES],
     globalIgnoredNames: config.globalIgnoredNames,
     launchOnStartup,
-    chatContrast: config.chatContrast
+    chatContrast: config.chatContrast,
+    reduceToolClutter: config.reduceToolClutter
   };
 }
 
@@ -281,6 +307,13 @@ async function saveChatContrast(value) {
   const config = await readConfig();
   await writeConfig({ ...config, chatContrast });
   return { chatContrast };
+}
+
+async function saveReduceToolClutter(enabled) {
+  if (typeof enabled !== 'boolean') throw new Error('Invalid tool clutter setting');
+  const config = await readConfig();
+  await writeConfig({ ...config, reduceToolClutter: enabled });
+  return { reduceToolClutter: enabled };
 }
 
 async function saveLaunchOnStartup(enabled) {
@@ -405,6 +438,7 @@ function sortAgentsByManualOrder(agents, config) {
 }
 
 function isPreviewableTextName(name) {
+  if (name.toLowerCase() === '.gitignore') return true;
   if (FILE_SENTINELS.includes(name)) return true;
   if (name.startsWith('.env')) return name === '.env.example';
   return TEXT_EXTENSIONS.has(extname(name).toLowerCase());
@@ -1050,11 +1084,11 @@ async function readWorkspaceFile(agentPath, filePath, options = {}) {
   }
 
   if (!fileStat.isFile()) return { ok: false, reason: 'not-file', content: '[not a file]' };
-  if (fileStat.size > MAX_FILE_PREVIEW_BYTES) {
+  if (fileStat.size > MAX_EDITOR_FILE_BYTES) {
     return {
       ok: false,
       reason: 'too-large',
-      content: `[file too large to preview - ${formatBytes(fileStat.size)}]`,
+      content: `[file exceeds the 50 MB editor limit - ${formatBytes(fileStat.size)}]`,
       size: fileStat.size,
       modified: fileStat.mtime.toISOString(),
       modifiedMs: fileStat.mtimeMs
@@ -1109,8 +1143,8 @@ async function saveWorkspaceFile(agentPath, filePath, content, expected = {}) {
 
   const normalizedContent = String(content ?? '');
   const byteLength = Buffer.byteLength(normalizedContent, 'utf8');
-  if (byteLength > MAX_FILE_PREVIEW_BYTES) {
-    throw new Error(`File is too large to save (${formatBytes(byteLength)})`);
+  if (byteLength > MAX_EDITOR_FILE_BYTES) {
+    throw new Error(`File exceeds the 50 MB editor limit (${formatBytes(byteLength)}); cannot save`);
   }
 
   await writeFile(target, normalizedContent, 'utf8');
@@ -1147,8 +1181,8 @@ async function createWorkspaceFile(agentPath, relativePath, content = '') {
 
   const normalizedContent = String(content ?? '');
   const byteLength = Buffer.byteLength(normalizedContent, 'utf8');
-  if (byteLength > MAX_FILE_PREVIEW_BYTES) {
-    throw new Error(`File is too large to create (${formatBytes(byteLength)})`);
+  if (byteLength > MAX_EDITOR_FILE_BYTES) {
+    throw new Error(`File exceeds the 50 MB editor limit (${formatBytes(byteLength)}); cannot create`);
   }
 
   await writeFile(target, normalizedContent, { encoding: 'utf8', flag: 'wx' });
@@ -1454,6 +1488,7 @@ function augmentedEnv() {
     '/opt/homebrew/sbin',
     '/usr/local/bin',
     '/usr/local/sbin',
+    `${homedir()}/.local/bin`,
     `${homedir()}/.npm-global/bin`,
     `${homedir()}/.nvm/versions/node/current/bin`
   ];
@@ -1979,11 +2014,50 @@ async function scheduleModelOptions(cwd = homedir()) {
     claude = discovery.models;
     claudeVersion = discovery.version;
   } catch (error) {
-    claudeError = `${error.message} Claude scheduling is unavailable until its supported models can be verified.`;
+    claudeError = `${error.message} Explicit Claude model choices are unavailable until supported models can be verified.`;
     claude = [];
   }
   return { claude, codex, claudeVersion, claudeError };
 }
+function assertChatModelRequest(event, request) {
+  if (!BrowserWindow.fromWebContents(event.sender) || event.senderFrame !== event.sender.mainFrame) throw new Error('Use the model selector in the app window.');
+  return assertAgentPathMatches(request.agentId, request.cwd);
+}
+ipcMain.handle('chat-models:get', async (event, request = {}) => {
+  const cwd = assertChatModelRequest(event, request);
+  const root = await realpath(cwd);
+  const config = await readConfig();
+  const session = terminalSessions.get(terminalKey(event.sender.id, request.agentId));
+  return { defaults: config.chatModelDefaults[root] || {}, session: session?.managed && session.mode !== 'prompt' ? {
+    provider: session.provider, token: session.modelToken, selection: session.modelSelection,
+    resumed: session.mode === 'resume'
+  } : null };
+});
+ipcMain.handle('chat-models:catalog', async (event, request = {}) => scheduleModelOptions(assertChatModelRequest(event, request)));
+ipcMain.handle('chat-models:save', async (event, request = {}) => {
+  const cwd = assertChatModelRequest(event, request);
+  const root = await realpath(cwd);
+  const selection = validateChatModel(request.provider, request, await scheduleModelOptions(cwd));
+  const config = await readConfig();
+  config.chatModelDefaults[root] = { ...config.chatModelDefaults[root], [request.provider]: selection };
+  await writeConfig(config);
+  return selection;
+});
+ipcMain.handle('chat-models:prepare', async (event, request = {}) => {
+  const cwd = assertChatModelRequest(event, request);
+  const key = terminalKey(event.sender.id, request.agentId);
+  const session = terminalSessions.get(key);
+  const guard = { ...request, sender: event.sender };
+  assertChatSwitchSession(session, guard);
+  const inputRevision = session.inputRevision || 0;
+  if (request.provider === 'codex') validateChatModel(request.provider, request, await scheduleModelOptions(cwd));
+  if (terminalSessions.get(key) !== session || (session.inputRevision || 0) !== inputRevision) throw new Error('The chat or terminal input changed. Reopen the selector.');
+  assertChatSwitchSession(session, guard);
+  const command = chatSwitchCommand(request.provider, request, request.control);
+  // Never press Enter, erase a draft, or claim that the CLI applied a request.
+  session.process.write('\x1b[200~' + command + '\x1b[201~');
+  return { command };
+});
 ipcMain.handle('cron:models', (_event, { agentId, cwd } = {}) => scheduleModelOptions(
   agentId ? assertAgentPathMatches(agentId, cwd) : homedir()
 ));
@@ -2001,6 +2075,7 @@ ipcMain.handle('app:check-for-updates', async (event) => {
   await appUpdates.check();
 });
 ipcMain.handle('settings:get', getSettings);
+ipcMain.handle('settings:save-reduce-tool-clutter', async (_event, value) => saveReduceToolClutter(value));
 ipcMain.handle('settings:save-chat-contrast', async (_event, value) => saveChatContrast(value));
 ipcMain.handle('settings:save-global-ignored-names', async (_event, names) => saveGlobalIgnoredNames(names));
 ipcMain.handle('settings:save-launch-on-startup', async (_event, enabled) => saveLaunchOnStartup(enabled));
@@ -2247,9 +2322,17 @@ ipcMain.handle('power:set-agent-running', async (event, { agentId, running } = {
 
   return { activeCount: runningAgentPowerKeys.size, blocking: isSleepBlockerActive() };
 });
+for (const method of ['list', 'clear']) ipcMain.handle(`traces:${method}`, async (event, input = {}) => {
+  if (!BrowserWindow.fromWebContents(event.sender) || event.senderFrame !== event.sender.mainFrame) throw new Error('Traces are only available in the app window.');
+  const agent = (await scanAgents()).find(a => a.id === input.agentId && a.path === input.path);
+  if (!agent) throw new Error('Select a connected workspace.');
+  if (method === 'clear') await toolTraces.clear(agent.id, typeof input.id === 'string' ? input.id : undefined);
+  return toolTraces.list(agent.id);
+});
+
 ipcMain.handle('terminal:start', async (event, { agentId, cwd }) => {
   if (appUpdates?.installing) throw new Error('BotLogik is restarting to update.');
-  const resolvedCwd = resolve(cwd);
+  const resolvedCwd = assertAgentPathMatches(agentId, cwd);
   if (openRouter?.isRunning(await realpath(resolvedCwd))) throw new Error('Stop the OpenRouter run before starting a terminal.');
   if (!existsSync(resolvedCwd)) {
     throw new Error(`Workspace does not exist: ${resolvedCwd}`);
@@ -2259,7 +2342,7 @@ ipcMain.handle('terminal:start', async (event, { agentId, cwd }) => {
   const key = terminalKey(sender.id, agentId);
   const existing = terminalSessions.get(key);
   if (existing && existing.cwd === resolvedCwd && !existing.managed) {
-    return { sessionId: key, cwd: resolvedCwd, shell: existing.shell };
+    return { sessionId: key, cwd: resolvedCwd, shell: existing.shell, reused: true };
   }
   if (existing) stopTerminalSession(key);
 
@@ -2269,14 +2352,10 @@ ipcMain.handle('terminal:start', async (event, { agentId, cwd }) => {
     cols: 80,
     rows: 24,
     cwd: resolvedCwd,
-    env: {
-      ...augmentedEnv(),
-      TERM: 'xterm-256color',
-      COLORTERM: 'truecolor'
-    }
+    env: freshTerminalEnvironment(augmentedEnv())
   });
 
-  terminalSessions.set(key, { process: child, cwd: resolvedCwd, shell });
+  terminalSessions.set(key, { process: child, cwd: resolvedCwd, shell, owner: sender });
 
   child.onData((data) => {
     sendToWebContents(sender, 'terminal:output', { sessionId: key, data });
@@ -2307,6 +2386,7 @@ ipcMain.handle('terminal:start-managed', async (event, { agentId, cwd, provider,
   try {
     let launch;
     let providerConversationId = null;
+    let modelSelection = null;
     if (mode === 'resume') {
       await conversationHistory.list(historyAgents.length ? historyAgents : await scanAgents());
       const saved = conversationHistory.get(provider, conversationId);
@@ -2325,7 +2405,14 @@ ipcMain.handle('terminal:start-managed', async (event, { agentId, cwd, provider,
       if (provider === 'claude' && mode === 'prompt') {
         assertClaudeModelSupported({ model, reasoningEffort }, await scheduleModelOptions(resolvedCwd));
       }
+      if (mode !== 'prompt') {
+        const config = await readConfig();
+        const preference = model === undefined ? config.chatModelDefaults[await realpath(resolvedCwd)]?.[provider] : { model, reasoningEffort };
+        modelSelection = normalizeChatModel(preference);
+        if (modelSelection.model) validateChatModel(provider, modelSelection, await scheduleModelOptions(resolvedCwd));
+      }
       launch = managedAgentCommand(provider, mode, prompt, model, reasoningEffort);
+      if (modelSelection) launch.args.push(...chatModelArgs(provider, modelSelection));
       if (provider === 'claude') {
         if (runId) {
           const config = await readConfig();
@@ -2350,12 +2437,16 @@ ipcMain.handle('terminal:start-managed', async (event, { agentId, cwd, provider,
       if (response !== 1) return { cancelled: true };
       if (terminalSessions.get(key) !== existing) throw new Error('The active session changed. Please try again.');
     }
-    if (existing) stopTerminalSession(key);
-
     const launchEnv = augmentedEnv();
+    launch.command = await resolveCli(launch.command, launchEnv);
+    if (existing) stopTerminalSession(key);
     const monitor = await getActivityBridge().prepare({ provider, agentId, sessionId: key,
       conversationId: providerConversationId, automated: mode === 'prompt', env: launchEnv });
     launch.args.push(...monitor.args);
+    let presentationNotice = '';
+    if (provider === 'claude' && mode !== 'prompt' && (await readConfig()).reduceToolClutter) {
+      presentationNotice = applyClaudeFocus({ provider, mode, version: monitor.version, args: launch.args, env: launchEnv });
+    }
     let child;
     try {
       child = pty.spawn(launch.command, launch.args, {
@@ -2372,7 +2463,7 @@ ipcMain.handle('terminal:start-managed', async (event, { agentId, cwd, provider,
       });
     } catch (error) {
       monitor.dispose(1, null);
-      sendToWebContents(sender, 'terminal:exit', { sessionId: key, code: 1, signal: null });
+      // The rejected launch is the failure notification; no session was registered.
       throw error;
     }
 
@@ -2382,6 +2473,9 @@ ipcMain.handle('terminal:start-managed', async (event, { agentId, cwd, provider,
       command: launch.command,
       args: launch.args,
       managed: true,
+      mode,
+      modelToken: randomUUID(),
+      modelSelection,
       provider,
       conversationId: providerConversationId,
       runId,
@@ -2402,7 +2496,7 @@ ipcMain.handle('terminal:start-managed', async (event, { agentId, cwd, provider,
       sendToWebContents(sender, 'terminal:exit', { sessionId: key, code: exitCode, signal });
     });
 
-    return { sessionId: key, cwd: resolvedCwd, command: launch.command, args: launch.args, managed: true, provider, conversationId: providerConversationId, activity: monitor.activity.snapshot() };
+    return { sessionId: key, cwd: resolvedCwd, command: launch.command, args: launch.args, managed: true, provider, conversationId: providerConversationId, activity: monitor.activity.snapshot(), presentationNotice };
   } finally { pendingManagedLaunches.delete(key); }
 });
 // Capture the owning session before opening the picker; never insert into a replacement.
@@ -2494,7 +2588,8 @@ ipcMain.handle('images:release', (event, ids) => {
 
 ipcMain.on('terminal:input', (_event, { sessionId, input }) => {
   const session = terminalSessions.get(sessionId);
-  if (!session) return;
+  if (!session || session.owner !== _event.sender || typeof input !== 'string') return;
+  session.inputRevision = (session.inputRevision || 0) + 1;
   if (['\x03', '\x1b', '\x1b\x1b'].includes(input)) session.monitor?.activity.accept({ hook_event_name: 'InputInterrupt' });
   session.process.write(input);
 });
@@ -2542,6 +2637,7 @@ function createWindow() {
 app.whenReady().then(async () => {
   openRouter = registerOpenRouter({
     ipcMain, BrowserWindow, safeStorage, shell, directory: CONFIG_DIR,
+    onTrace: (context, event) => toolTraces.event(context, event),
     getAgents: () => scanAgents(),
     getIgnoredNames: async () => (await readConfig()).globalIgnoredNames,
     canStart: async (agentId, root) => {

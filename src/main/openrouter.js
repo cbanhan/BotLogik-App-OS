@@ -15,7 +15,7 @@ export async function atomicJSON(path, value) {
   finally { await rm(temp, { force: true }); }
 }
 
-export function createOpenRouter({ directory, safeStorage, fetchImpl = globalThis.fetch, executeTool = executeLocalTool, onChange = () => {}, getIgnoredNames = async () => [] }) {
+export function createOpenRouter({ directory, safeStorage, fetchImpl = globalThis.fetch, executeTool = executeLocalTool, onChange = () => {}, onTrace = () => {}, getIgnoredNames = async () => [] }) {
   const active = new Map();
   const historyLocks = new Set();
   let modelCache = null;
@@ -80,7 +80,8 @@ export function createOpenRouter({ directory, safeStorage, fetchImpl = globalThi
   function view(chat) {
     const run = active.get(chat.root);
     return { id: chat.id, root: chat.root, title: chat.title, model: chat.model, messages: chat.messages.filter(m => m.role !== 'system').map(({ reasoning_details, reasoning, ...m }) => m),
-      pinned: chat.pinned === true, usage: chat.usage, updatedAt: chat.updatedAt, notice: chat.notice || '', busy: run?.chat?.id === chat.id,
+      pinned: chat.pinned === true, usage: chat.usage, updatedAt: chat.updatedAt, notice: chat.notice || '', error: chat.error || '', busy: run?.chat?.id === chat.id,
+      activeTool: run?.chat?.id === chat.id ? run.traceCall?.function?.name || null : null,
       pending: run?.chat?.id === chat.id ? run.pending || null : null };
   }
   function emit(run) { onChange(run.owner, view(run.chat)); }
@@ -170,6 +171,7 @@ export function createOpenRouter({ directory, safeStorage, fetchImpl = globalThi
   function approve(run, proposal) {
     run.controller.signal.throwIfAborted();
     return new Promise(resolve => {
+      if (run.traceCall) onTrace(run.chat.root, run.chat.id, { hook_event_name: 'PermissionRequest', tool_call_id: run.traceCall.id, tool_name: run.traceCall.function.name });
       run.pending = { id: randomUUID(), ...proposal };
       run.resolveApproval = resolve;
       emit(run);
@@ -207,8 +209,9 @@ export function createOpenRouter({ directory, safeStorage, fetchImpl = globalThi
       if (JSON.stringify(apiMessages([...chat.messages, userMessage])).length > Math.min(180_000, Math.max(4000, (model.context - 4096) * 2))) throw new Error('Message and attachments exceed this conversation’s context limit. Remove files or start a new chat.');
       chat.messages.push(userMessage);
       run.accepted = true;
+      onTrace(root, id, { hook_event_name: 'UserPromptSubmit', session_id: id });
       if (chat.title === 'New conversation') chat.title = text.trim().slice(0, 80);
-      chat.notice = ''; chat.updatedAt = new Date().toISOString();
+      chat.error = ''; chat.notice = ''; chat.updatedAt = new Date().toISOString();
       await save(chat); emit(run);
       for (let step = 0; step < maxRequests; step++) {
         run.controller.signal.throwIfAborted();
@@ -232,9 +235,14 @@ export function createOpenRouter({ directory, safeStorage, fetchImpl = globalThi
         for (const call of calls) {
           run.controller.signal.throwIfAborted();
           let result;
+          run.traceCall = call;
+          emit(run);
+          onTrace(root, id, { hook_event_name: 'PreToolUse', tool_call_id: call.id, tool_name: call.function.name, tool_input: call.function.arguments });
           try {
             result = await executeTool(root, call.function.name, JSON.parse(call.function.arguments), { signal: run.controller.signal, approve: proposal => approve(run, proposal) });
           } catch (e) { if (run.controller.signal.aborted) throw e; result = { error: redact(e.message).slice(0, 1000) }; }
+          onTrace(root, id, { hook_event_name: result?.error ? 'PostToolUseFailure' : 'PostToolUse', tool_call_id: call.id, tool_name: call.function.name, tool_response: result, denied: result?.denied === true });
+          run.traceCall = null;
           chat.messages.push({ role: 'tool', tool_call_id: call.id, content: redact(JSON.stringify(result)).slice(0, 110_000) });
           await save(chat); emit(run);
         }
@@ -247,13 +255,14 @@ export function createOpenRouter({ directory, safeStorage, fetchImpl = globalThi
     } catch (e) {
       if (!run.chat || !run.accepted) throw e;
       repairTools(run.chat);
+      run.chat.error = run.controller.signal.aborted ? '' : redact(e.message).slice(0, 1000);
       run.chat.notice = run.controller.signal.aborted ? 'Stopped. Completed changes remain on disk.' : redact(e.message).slice(0, 1000);
     } finally {
       try {
         if (run.chat) { run.chat.updatedAt = new Date().toISOString(); await save(run.chat); }
       } finally {
         active.delete(root);
-        try { if (run.chat) emit(run); } finally { run.finish(); }
+        try { if (run.chat) { onTrace(root, run.chat.id, { hook_event_name: 'Stop' }); emit(run); } } finally { run.finish(); }
       }
     }
   }

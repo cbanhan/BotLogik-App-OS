@@ -1,5 +1,7 @@
 const { contextBridge, webFrame } = require('electron');
 let schedules = [];
+const traceSessions = new Map();
+let traceChanged;
 let globalIgnoredNames = [];
 let claudeCatalogError = '';
 let claudeCatalog = [{id:'',label:'Claude default',efforts:['low','medium','high']},{id:'sonnet',label:'Sonnet current',efforts:['low','medium','high']},{id:'opus',label:'Opus current',efforts:['low','medium','high']}];
@@ -11,6 +13,15 @@ const pending = new Map();
 const copy = value => JSON.parse(JSON.stringify(value));
 const emit = chat => listener?.(copy(chat));
 return {
+ presentation: mode => {
+  const c=[...chats.values()].at(-1); if(!c)return;
+  const name=mode==='reading'?'read_file':'run_command';
+  c.messages=[{role:'user',content:'Synthetic request'},{role:'assistant',content:'You can also run `npm test` yourself.',tool_calls:[{id:'compact-call',function:{name,arguments:JSON.stringify(name==='read_file'?{path:'hello.js'}:{command:'echo synthetic-command'})}}]}];
+  c.busy=['running','reading','approval'].includes(mode); c.activeTool=c.busy?name:null;c.pending=mode==='approval'?{id:'synthetic-approval',name:'run_command',command:'echo approval-command',warning:'Synthetic approval'}:null;
+  if(!c.busy)c.messages.push({role:'tool',tool_call_id:'compact-call',content:JSON.stringify({exitCode:mode==='failed'?1:0,output:mode==='failed'?'Synthetic failure':'synthetic-output'})});
+  emit(c);
+ },
+ fail: () => { for (const chat of chats.values()) { chat.error = 'Insufficient OpenRouter credits.'; emit(chat); } },
  mentionFiles: async r => ({ files: [...contents.keys()].filter(p => p.startsWith(r.path + '/')).map(p => p.slice(r.path.length + 1)).filter(p => p.toLowerCase().includes((r.query || '').toLowerCase())).sort(), limited: false }),
  modelPreference: async r => { if (r.model !== undefined) modelPreferences.set(r.path, r.model); return { model: modelPreferences.get(r.path) || '' }; },
  status: async () => ({configured:true, secureStorage:true}),
@@ -48,14 +59,25 @@ webFrame.executeJavaScript('window.MonacoEnvironment = { globalAPI: true }');
 const agents = ['one', 'two'].map(id => ({ id, name: `Workspace ${id}`, path: `/workspace/${id}`, status: 'idle', fileCount: 3, isAgentWorkspace: true }));
 const contents = new Map(agents.flatMap(a => [[`${a.path}/agent.md`, '# Agent instructions\n'], [`${a.path}/notes.md`, '# Notes\n']]));
 const stamps = new Map([...contents.keys()].map(path => [path, 1]));
-let starts = 0, stops = 0, output;
+let shellLaunches = [];
+let modelSession = null, modelLaunches = [], modelPrepared = [], modelBusy = false;
+const modelDefaults = () => JSON.parse(sessionStorage.getItem('test.modelDefaults') || '{}');
+const modelCatalog = () => ({claude:claudeCatalog,claudeError:claudeCatalogError,codex:[{id:'test-codex',label:'GPT Test 5.5',efforts:['low','medium','high','xhigh']}]});
+let starts = 0, stops = 0, output, exit, launchFailure = '', earlyExit = false;
 let imageId = 0, insertedImages = [];
 const info = path => ({ kind: 'file', path, name: path.split('/').at(-1), relativePath: path.split('/').at(-1), depth: 0, ext: 'md', size: contents.get(path).length, sizeLabel: `${contents.get(path).length} B`, modifiedMs: stamps.get(path), modifiedLabel: 'just now', previewable: true });
 contextBridge.exposeInMainWorld('botlogik', {
  openrouter: openrouterMock,
+ chatModels: {
+  get: async r => ({defaults:modelDefaults()[r.cwd] || {},session:modelSession?.agentId===r.agentId?modelSession:null}),
+  catalog: async () => modelCatalog(),
+  save: async r => { const all=modelDefaults(); const value={model:r.model,reasoningEffort:r.reasoningEffort};all[r.cwd]={...all[r.cwd],[r.provider]:value};sessionStorage.setItem('test.modelDefaults',JSON.stringify(all));return value; },
+  prepare: async r => {if(modelBusy)throw Error('Wait until the agent finishes and returns to its prompt.');if(!r.emptyPrompt||r.token!==modelSession?.token)throw Error('The chat changed.');modelPrepared.push(r);return {command:r.provider==='claude'?'/'+r.control:'/model '+r.model};}
+ },
  settings: {
-  get: async () => ({ chatContrast: sessionStorage.getItem('test.chatContrast'), globalIgnoredNames }),
+  get: async () => ({ chatContrast: sessionStorage.getItem('test.chatContrast'), reduceToolClutter: sessionStorage.getItem('test.reduceToolClutter') === 'true', globalIgnoredNames }),
   saveGlobalIgnoredNames: async names => {globalIgnoredNames=names;return {globalIgnoredNames};},
+  saveReduceToolClutter: async value => {sessionStorage.setItem('test.reduceToolClutter',String(value));return {reduceToolClutter:value};},
   saveChatContrast: async value => { sessionStorage.setItem('test.chatContrast', value); return {chatContrast:value}; }
  },
  agents: {
@@ -93,17 +115,27 @@ contextBridge.exposeInMainWorld('botlogik', {
   }
  },
  git: { status: async () => ({isRepo:true,branch:'main',changes:[{file:'agent.md',status:'M'}]}), diff: async () => '@@ -1 +1 @@\n-old\n+new' },
+ traces: { list: async r => ({sessions: traceSessions.get(r.agentId) || [], storageError:''}), clear: async r => {traceSessions.set(r.agentId,(traceSessions.get(r.agentId)||[]).filter(s=>s.id!==r.id));traceChanged?.();}, onChanged: callback => {traceChanged=callback;return ()=>{};} },
  terminal: {
-  startManaged: async () => {starts++;return {sessionId:'mock-session'};}, stop: async () => {stops++;},
+  start: async (agentId, cwd) => { shellLaunches.push({agentId,cwd}); output?.({sessionId:'mock-shell',data:'Shell ready\r\n'}); return {sessionId:'mock-shell'}; },
+  startManaged: async (agentId,cwd,provider,mode,prompt,conversationId,runId,model,reasoningEffort) => {starts++; const selection=mode==='resume'?null:model===undefined?(modelDefaults()[cwd]?.[provider] || {model:'',reasoningEffort:'default'}):{model,reasoningEffort};modelSession={agentId,provider,token:String(starts),selection};modelLaunches.push({agentId,provider,mode,selection}); if (launchFailure) throw new Error(launchFailure); if (earlyExit) { output?.({sessionId:'mock-session',data:'Synthetic startup failure\r\n'}); exit?.({sessionId:'mock-session',code:1,signal:null}); } return {sessionId:'mock-session'};}, stop: async () => {stops++;modelSession=null;},
+  onExit: callback => {exit=callback;return ()=>{};},
   onOutput: callback => {output=callback;return ()=>{};}, resize: () => {}, input: () => {}
  }
 });
 contextBridge.exposeInMainWorld('workspaceTest', {
+ modelState: () => ({launches:modelLaunches,prepared:modelPrepared,defaults:modelDefaults()}),
+ modelBusy: value => {modelBusy=value;},
+ presentation: mode => openrouterMock.presentation(mode),
+ traces: (agentId, sessions) => {traceSessions.set(agentId,sessions);traceChanged?.();},
+ openrouterFailure: () => openrouterMock.fail(),
+ launchFailure: message => {launchFailure=message;}, earlyExit: value => {earlyExit=value;},
  claudeModels: (models, error = '') => {claudeCatalog=models;claudeCatalogError=error;},
  change: (path, text) => {contents.set(path,text);stamps.set(path,stamps.get(path)+1);},
  remove: path => {contents.delete(path);stamps.delete(path);},
  contents: path => contents.get(path),
  stats: () => ({starts,stops}),
+ shellLaunches: () => shellLaunches,
  imageStats: () => insertedImages,
  output: () => output?.({sessionId:'mock-session',data:'Agent is ready.\r\n'})
 });

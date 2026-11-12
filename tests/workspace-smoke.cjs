@@ -28,6 +28,12 @@ app.whenReady().then(async () => {
   assert.equal(await run(`document.getElementById('tab-files').getAttribute('aria-pressed')`),'true');
   await open('/workspace/one/agent.md');
   await wait(`document.querySelector('#monaco-host .view-lines')?.textContent.includes('instructions')`);
+  await click('launch-terminal');
+  await wait(`document.getElementById('agent-launch-overlay').classList.contains('hidden')`);
+  assert.deepEqual(await run(`workspaceTest.shellLaunches()`), [{agentId:'one',cwd:'/workspace/one'}]);
+  assert.equal(await run(`document.getElementById('terminal-end-session').classList.contains('hidden')`),false);
+  await click('terminal-end-session');
+  await wait(`!document.getElementById('agent-launch-overlay').classList.contains('hidden')`);
   await click('launch-claude');
   await wait(`document.getElementById('agent-launch-overlay').classList.contains('hidden')`);
   await run(`workspaceTest.output(); window.originalTerminal=document.querySelector('#terminal-host .xterm')`);
@@ -107,15 +113,15 @@ app.whenReady().then(async () => {
   assert.notEqual(await run(`getComputedStyle(document.getElementById('pane-chat')).display`),'none');
   assert.equal(await run(`document.querySelector('#terminal-host .xterm') === window.originalTerminal`),true);
   await click('layout-split');
-  assert.deepEqual(await run(`workspaceTest.stats()`),{starts:1,stops:0});
+  assert.deepEqual(await run(`workspaceTest.stats()`),{starts:1,stops:1});
   assert.equal(await run(`document.getElementById('terminal-end-session').classList.contains('hidden')`),false);
   await click('terminal-end-session');
   await wait(`!document.getElementById('agent-launch-overlay').classList.contains('hidden')`);
-  assert.deepEqual(await run(`workspaceTest.stats()`),{starts:1,stops:1});
+  assert.deepEqual(await run(`workspaceTest.stats()`),{starts:1,stops:2});
   assert.equal(await run(`document.getElementById('terminal-end-session').classList.contains('hidden')`),true);
   await click('launch-codex');
   await wait(`document.getElementById('agent-launch-overlay').classList.contains('hidden')`);
-  assert.deepEqual(await run(`workspaceTest.stats()`),{starts:2,stops:1});
+  assert.deepEqual(await run(`workspaceTest.stats()`),{starts:2,stops:2});
 
   if (await run(`document.getElementById('tab-files').getAttribute('aria-pressed') !== 'true'`)) await click('tab-files');
   await run(`document.getElementById('terminal-resize').dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowRight',bubbles:true}))`);

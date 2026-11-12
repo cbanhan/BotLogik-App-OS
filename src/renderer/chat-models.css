@@ -1,0 +1,15 @@
+#chat-model-picker { width: 390px; max-width: calc(100vw - 32px); padding: 20px; border: 1px solid #3f3f46; border-radius: 14px; background: #202023; color: #f4f4f5; box-shadow: 0 18px 65px #0008; }
+#chat-model-picker::backdrop { background: #0006; }
+#chat-model-picker header, #chat-model-picker footer { display: flex; align-items: center; gap: 8px; justify-content: space-between; }
+#chat-model-picker label { display: block; font-size: 12px; margin-top: 14px; }
+#chat-model-picker select { display: block; width: 100%; margin-top: 6px; padding: 8px; background: #303035; border: 1px solid #52525b; border-radius: 6px; color: #fafafa; }
+#chat-model-picker p { font-size: 11px; color: #a1a1aa; line-height: 1.5; margin-top: 10px; }
+#chat-model-picker .cm-project { color: #e4e4e7; }
+#chat-model-picker .cm-check { display: flex; align-items: flex-start; gap: 8px; line-height: 1.5; }
+#chat-model-picker input { margin-top: 3px; }
+#chat-model-picker button { padding: 7px 9px; border: 1px solid #52525b; border-radius: 6px; font-size: 11px; }
+#chat-model-picker button:disabled { opacity: .4; }
+#chat-model-picker footer { margin-top: 16px; flex-wrap: wrap; }
+#chat-model-picker .cm-apply { background: #e4e4e7; color: #18181b; }
+#chat-model-picker .cm-error { color: #fda4af; }
+#chat-model-picker [hidden] { display: none; }

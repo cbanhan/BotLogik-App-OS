@@ -115,3 +115,9 @@
 .or-history-empty { padding:20px 8px; color:#a1a1aa; }
 .or-history-error { color:#ffb1b1; font-size:12px; }
 .or-history-error:empty { display:none; }
+
+.or-tool-summary { display:flex; align-items:center; flex-wrap:wrap; gap:8px; padding:8px 0; color:#a1a1aa; font-size:12px; }
+.or-tool-summary button { margin-left:auto; }
+.or-tool-spinner { width:12px; height:12px; border:2px solid #ffffff30; border-top-color:#93b9ff; border-radius:50%; animation:or-tool-spin 1s linear infinite; }
+@keyframes or-tool-spin { to { transform:rotate(360deg); } }
+@media (prefers-reduced-motion:reduce) { .or-tool-spinner { animation:none; } }

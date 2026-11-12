@@ -1,6 +1,6 @@
 # Application context
 
-BotLogik is a lightweight Mac workspace for AI-assisted development. It is an Electron application with an electron-vite renderer, node-pty/xterm terminals, Monaco editing, and a constrained IPC bridge. The current version is 1.0.9; package.json is the version source of truth.
+BotLogik is a lightweight Mac workspace for AI-assisted development. It is an Electron application with an electron-vite renderer, node-pty/xterm terminals, Monaco editing, and a constrained IPC bridge. The current version is 1.1.0; package.json is the version source of truth.
 
 ## Scope and architecture
 
@@ -10,9 +10,13 @@ Start with README.md. Main-process orchestration is in src/main/main.js; the IPC
 
 The product is a focused workspace, not a full IDE or Git client. Keep Git operations read-only. Home is a dashboard for recent and scheduled activity. Preserve workspace boundaries, approval requirements for OpenRouter writes/commands, cancellation, and checks for unsaved edits and active sessions.
 
+## Contribution policy
+
+External contributions and pull requests are not accepted. Users who want modifications should fork the repository and maintain their own instance. See CONTRIBUTING.md.
+
 ## Working practices
 
-- Use npm ci and the checked-in lockfile. Node.js 22 is the contributor baseline.
+- Use npm ci and the checked-in lockfile. Node.js 22 is the development baseline.
 - Run npm test and npm run build for application changes. Run the appropriate Electron smoke test when changing workspace or OpenRouter UI behavior; use disposable workspaces and mock provider calls.
 - Never commit credentials, real conversations, local attachments, user configuration, generated builds, or personal filesystem paths. Use synthetic fixtures.
 - Keep context isolation and renderer IPC validation intact. Do not expose secrets to the renderer.

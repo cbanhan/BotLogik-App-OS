@@ -21,8 +21,8 @@ test('hook flags are additive, observational and version gated', () => {
 
 test('real hook helper sends a bounded event; stale credentials and browser requests are rejected', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'botlogik-activity-'));
-  const updates = [];
-  const bridge = createActivityBridge({ directory, getVersion: async () => '0.147.0', onChange: state => updates.push(state) });
+  const updates = [], traces = [];
+  const bridge = createActivityBridge({ directory, getVersion: async () => '0.147.0', onChange: state => updates.push(state), onTrace: (state, event) => traces.push({ state, event }) });
   try {
     const session = await bridge.prepare({ provider: 'codex', agentId: 'a', sessionId: 'terminal', env: process.env });
     assert.ok(session.env.BOTLOGIK_ACTIVITY_TOKEN);
@@ -39,6 +39,14 @@ test('real hook helper sends a bounded event; stale credentials and browser requ
     const url = `http://127.0.0.1:${session.env.BOTLOGIK_ACTIVITY_PORT}/activity`;
     const headers = { authorization: `Bearer ${session.env.BOTLOGIK_ACTIVITY_TOKEN}` };
     assert.equal((await fetch(url, { method: 'POST', body: '{}', headers: { ...headers, origin: 'https://example.com' } })).status, 403);
+    await fetch(url, { method: 'POST', headers, body: JSON.stringify({ hook_event_name: 'PreToolUse', session_id: 'saved-session', tool_use_id: 'read-1', tool_name: 'Read', tool_input: { path: 'app.js' } }) });
+    assert.equal(traces.at(-1).event.tool_name, 'Read');
+    assert.equal(traces.at(-1).state.conversationId, 'saved-session');
+    const toolChild = spawn(process.execPath, [join(directory, 'report-activity.cjs')], { env: { ...process.env, ...session.env } });
+    toolChild.stdin.end(JSON.stringify({ hook_event_name: 'PostToolUse', session_id: 'saved-session', tool_use_id: 'read-1', tool_name: 'Read', tool_response: { password: 'must-be-redacted', stdout: 'x'.repeat(4000), exit_code: 1 } }));
+    assert.equal(await new Promise(resolve => toolChild.on('exit', resolve)), 0);
+    assert.equal(traces.at(-1).event.tool_failed, true);
+    assert.ok(!JSON.stringify(traces).includes('must-be-redacted'));
     session.dispose(0, null, true);
     assert.equal((await fetch(url, { method: 'POST', body: '{"hook_event_name":"Stop"}', headers })).status, 403);
     assert.equal(updates.at(-1).state, 'stopped');

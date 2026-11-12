@@ -1,6 +1,6 @@
 {
   "name": "botlogik-app",
-  "version": "1.0.9",
+  "version": "1.1.0",
   "description": "BotLogik desktop app",
   "main": "out/main/index.js",
   "private": true,

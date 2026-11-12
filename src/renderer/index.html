@@ -325,6 +325,7 @@
                     </div>
                   </div>
                   <button id="launch-openrouter" class="launch-card mt-2 w-full rounded-lg px-3 py-3 text-left"><span class="text-[14px] font-semibold text-bright">OpenRouter</span><span class="ml-2 text-[12px] text-text/80">Choose a model · Use your API key · Build locally</span></button>
+                  <button id="launch-terminal" class="launch-card mt-2 w-full rounded-lg px-3 py-3 text-left"><span class="text-[14px] font-semibold text-bright">Open Terminal</span><span class="ml-2 text-[12px] text-text/80">Use a regular shell here in this workspace folder</span></button>
                   <div id="starter-context-row" class="mt-3 flex items-center gap-3 rounded-lg border border-white/[.16] bg-white/[.045] px-3 py-2">
                     <span class="grid h-8 w-8 shrink-0 place-items-center rounded bg-white/[.05] text-text/75">
                       <i data-lucide="bookmark" class="h-4 w-4"></i>
@@ -531,6 +532,18 @@
                 <option value="slate">Slate</option>
                 <option value="deep-teal">Deep Teal</option>
               </select>
+            </div>
+          </section>
+          <section class="rounded-lg border border-white/[.08] bg-white/[.025]">
+            <div class="flex items-center gap-3 px-4 py-3">
+              <div class="min-w-0 flex-1">
+                <h4 id="settings-tool-clutter-label" class="text-[13px] font-medium text-text">Reduce tool clutter</h4>
+                <p id="settings-tool-clutter-description" class="mt-1 text-[12px] text-mute">Applies to Claude Code and OpenRouter. Codex is not supported yet.</p>
+                <p class="mt-1 text-[11px] text-mute/70">OpenRouter updates immediately. Claude Code uses Focus view from the next session (2.1.311+). Details stay in Tools.</p>
+              </div>
+              <button id="settings-tool-clutter-toggle" type="button" role="switch" aria-checked="false" aria-labelledby="settings-tool-clutter-label" aria-describedby="settings-tool-clutter-description" class="relative h-6 w-11 shrink-0 rounded-full border border-white/[.12] bg-white/[.08] transition-colors focus:outline-none focus:ring-2 focus:ring-blue/40">
+                <span class="absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-mute/80 transition-transform"></span>
+              </button>
             </div>
           </section>
           <section class="rounded-lg border border-white/[.08] bg-white/[.025]">
@@ -884,6 +897,9 @@
       import { version as appVersion } from '../../package.json';
       import { activityStatusInfo, isCurrentActivity } from './activity-status';
       import { setupCreateAgent } from './create-agent';
+      import { setupChatModels } from './chat-models.js';
+      import { setupToolTraces } from './tool-traces.js';
+      import { setupProviderErrors } from './provider-errors.js';
       import { setupOpenRouter } from './openrouter-chat';
       import { setupLaunchGridHighlight } from './launch-grid';
       import { setupImageAttachments } from './image-attachments';
@@ -1168,6 +1184,8 @@
         'deep-teal': '#152626'
       });
       let chatContrast = 'charcoal';
+      let reduceToolClutter = false;
+      const toolClutterToggle = document.getElementById('settings-tool-clutter-toggle');
       try {
         const saved = localStorage.getItem('botlogik.chatContrast');
         if (Object.hasOwn(chatBackgrounds, saved)) chatContrast = saved;
@@ -1179,11 +1197,29 @@
       let imageAttachments;
       const terminalSessionsByAgent = new Map();
       const terminalAgentsBySession = new Map();
+      const earlyTerminalEvents = new Map();
+      let handleOutputEvent, handleExitEvent;
+      function holdTerminalEvent(sessionId, event) {
+        if (!earlyTerminalEvents.has(sessionId)) earlyTerminalEvents.set(sessionId, []);
+        const events = earlyTerminalEvents.get(sessionId);
+        events.push(event);
+        if (events.length > 64) events.shift();
+        if (earlyTerminalEvents.size > 20) earlyTerminalEvents.delete(earlyTerminalEvents.keys().next().value);
+      }
+      function flushTerminalEvents(sessionId) {
+        const events = earlyTerminalEvents.get(sessionId) || [];
+        earlyTerminalEvents.delete(sessionId);
+        for (const event of events) {
+          if (event.type === 'output') handleOutputEvent(event.payload);
+          else handleExitEvent(event.payload);
+        }
+      }
+
       const terminalViewsByAgent = new Map();
       const runtimeStatusByAgent = new Map();
       const activityByAgent = new Map();
       const openRouterActivity = new Map();
-      const managedAgentByAgent = new Map();
+      const terminalProviderByAgent = new Map();
       let cronSchedulesByAgent = new Map();
       let scheduledRunsByAgent = new Map();
       let starterFilesByAgent = new Map();
@@ -1222,8 +1258,12 @@
           ?.catch?.(error => console.warn('Failed to sync agent power state', error));
       }
 
+      function hasRunningTerminal(agentId) {
+        return Boolean(agentId && terminalProviderByAgent.has(agentId) && runtimeStatusByAgent.get(agentId) === 'running');
+      }
+
       function hasManagedRunningAgent(agentId) {
-        return Boolean(agentId && managedAgentByAgent.has(agentId) && runtimeStatusByAgent.get(agentId) === 'running');
+        return hasRunningTerminal(agentId) && terminalProviderByAgent.get(agentId) !== 'terminal';
       }
 
       function hasActiveScheduledRun(agentId) {
@@ -1332,6 +1372,28 @@
         applyChatBackground();
       }
 
+      function renderToolClutterToggle() {
+        toolClutterToggle.setAttribute('aria-checked', String(reduceToolClutter));
+        toolClutterToggle.classList.toggle('bg-blue/80', reduceToolClutter);
+        toolClutterToggle.classList.toggle('border-blue/60', reduceToolClutter);
+        toolClutterToggle.classList.toggle('border-white/[.12]', !reduceToolClutter);
+        toolClutterToggle.classList.toggle('bg-white/[.08]', !reduceToolClutter);
+        toolClutterToggle.querySelector('span').classList.toggle('translate-x-5', reduceToolClutter);
+        toolClutterToggle.querySelector('span').classList.toggle('bg-white', reduceToolClutter);
+        toolClutterToggle.querySelector('span').classList.toggle('bg-mute/80', !reduceToolClutter);
+      }
+
+      async function changeToolClutter() {
+        toolClutterToggle.disabled = true;
+        try {
+          const result = await window.botlogik.settings.saveReduceToolClutter(!reduceToolClutter);
+          reduceToolClutter = result.reduceToolClutter === true;
+          renderToolClutterToggle();
+          openRouterChat?.refreshPresentation();
+        } catch { showToast('Could not save tool appearance. Please try again.'); }
+        finally { toolClutterToggle.disabled = false; }
+      }
+
       function renderSettingsStartupToggle() {
         if (!settingsStartupToggle) return;
         const knob = settingsStartupToggle.querySelector('span');
@@ -1377,6 +1439,9 @@
             await window.botlogik.settings.saveChatContrast(chatContrast);
           }
           applyChatBackground();
+          reduceToolClutter = result?.reduceToolClutter === true;
+          renderToolClutterToggle();
+          openRouterChat?.refreshPresentation();
           settingsGlobalIgnoredNames = Array.isArray(result?.globalIgnoredNames) ? result.globalIgnoredNames : [];
           settingsDefaultGlobalIgnoredNames = Array.isArray(result?.defaultGlobalIgnoredNames) ? result.defaultGlobalIgnoredNames : [];
           settingsLaunchOnStartup = result?.launchOnStartup === true;
@@ -2012,11 +2077,15 @@
         return blocked;
       }
 
+      let providerErrors, toolTracesPanel, chatModelPicker;
       function updateLaunchOverlay() {
+        providerErrors?.render();
+        toolTracesPanel?.sync();
+        chatModelPicker?.sync();
         const blocked = renderScheduledRunBlocker(activeAgentId);
         const routerVisible = openRouterChat?.sync(agentById(activeAgentId), blocked);
         endSessionButton.classList.toggle('hidden', Boolean(routerVisible) || !terminalSessionsByAgent.has(activeAgentId));
-        const showOverlay = Boolean(activeAgentId && !blocked && !routerVisible && !hasManagedRunningAgent(activeAgentId));
+        const showOverlay = Boolean(activeAgentId && !blocked && !routerVisible && !hasRunningTerminal(activeAgentId));
         if (!showOverlay) resetLaunchGridHighlight();
         agentLaunchOverlay.classList.toggle('hidden', !showOverlay);
         agentLaunchOverlay.classList.toggle('flex', showOverlay);
@@ -2085,7 +2154,7 @@
       }
 
       function handleTerminalOutput(agentId, data) {
-        if (!managedAgentByAgent.has(agentId)) return;
+        if (!terminalProviderByAgent.has(agentId)) return;
         if (runtimeStatusByAgent.get(agentId) === 'stopped') return;
         setRuntimeStatus(agentId, 'running');
       }
@@ -2286,7 +2355,7 @@
         const timer = setTimeout(() => {
           starterInitTimers.delete(sessionId);
           if (terminalSessionsByAgent.get(agentId) !== sessionId) return;
-          if (managedAgentByAgent.get(agentId) !== agentName) return;
+          if (terminalProviderByAgent.get(agentId) !== agentName) return;
           if (runtimeStatusByAgent.get(agentId) !== 'running') return;
           const message = starterInitializationMessage(prefix);
           if (message) window.botlogik?.terminal?.input?.(sessionId, `${message}\r`);
@@ -2483,7 +2552,7 @@
           if (!cleanData) return;
           const sessionId = terminalSessionsByAgent.get(agentId);
           if (!sessionId) return;
-          if (!hasManagedRunningAgent(agentId)) return;
+          if (!hasRunningTerminal(agentId)) return;
           if (cleanData.includes('\r') || cleanData.includes('\n')) {
             setRuntimeStatus(agentId, 'running');
           }
@@ -3070,6 +3139,7 @@
         try {
           await window.botlogik.files.openTerminal(agent.path, folderPath);
         } catch (error) {
+          providerErrors?.report(agent.id, 'Terminal', 'launch', error.message || error);
           showToast(`Could not open Terminal: ${error.message || error}`);
         }
       }
@@ -4667,12 +4737,14 @@
           activityByAgent.set(agent.id, session.activity || null);
           terminalSessionsByAgent.set(agent.id, session.sessionId);
           terminalAgentsBySession.set(session.sessionId, agent.id);
-          managedAgentByAgent.set(agent.id, session.provider);
+          terminalProviderByAgent.set(agent.id, session.provider);
           setRuntimeStatus(agent.id, 'running');
           cronLaunchedSessions.add(session.sessionId);
           cronSessionByAgent.set(agent.id, session.sessionId);
           renderHomeSchedules();
           if (runId) cronRunBySession.set(session.sessionId, runId);
+          flushTerminalEvents(session.sessionId);
+          if (!terminalSessionsByAgent.has(agent.id)) return;
           renderScheduledRunBlocker(agent.id);
           renderCronSummary(agent.id);
           if (activeScheduleAgentId === agent.id) {
@@ -4684,6 +4756,7 @@
             requestAnimationFrame(() => window.botlogik?.terminal?.resize?.(session.sessionId, view.terminal.cols, view.terminal.rows));
           }
         } catch (error) {
+          providerErrors?.report(agent.id, 'Scheduled agent', 'launch', error.message || error);
           console.warn('Failed to launch scheduled agent', error);
           showToast(`Scheduled run could not start: ${error.message || error}`);
           if (runId) {
@@ -4854,7 +4927,7 @@
         cronLaunchedSessions.delete(oldSessionId);
         cronSessionByAgent.delete(agent.id);
         renderScheduledRunBlocker(agent.id);
-        managedAgentByAgent.delete(agent.id);
+        terminalProviderByAgent.delete(agent.id);
         activityByAgent.delete(agent.id);
         setRuntimeStatus(agent.id, 'idle');
 
@@ -4877,7 +4950,7 @@
         openRouterActivity.delete(agent.id);
         if (workspacePrefs.layout === 'editor') setWorkspaceLayout('split');
         setView('chat');
-        const existingAgentName = managedAgentByAgent.get(agent.id);
+        const existingAgentName = terminalProviderByAgent.get(agent.id);
         if (mode !== 'resume' && existingAgentName && runtimeStatusByAgent.get(agent.id) === 'running') {
           showToast(`${existingAgentName} is already running in this terminal`);
           terminalView(agent.id).terminal.focus();
@@ -4885,9 +4958,13 @@
         }
         const view = terminalView(agent.id);
         const previousSessionId = terminalSessionsByAgent.get(agent.id);
+        const modelChoice = mode === 'resume' ? undefined : chatModelPicker?.launchSelection(agent.id, agentName);
         try {
-          const session = await window.botlogik?.terminal?.startManaged?.(agent.id, agent.path, agentName, mode, undefined, conversationId);
+          const session = agentName === 'terminal'
+            ? await window.botlogik.terminal.start(agent.id, agent.path)
+            : await window.botlogik.terminal.startManaged(agent.id, agent.path, agentName, mode, undefined, conversationId, undefined, modelChoice?.model, modelChoice?.reasoningEffort);
           if (!session?.sessionId) return;
+          if (mode !== 'resume') chatModelPicker?.didLaunch(agent.id, agentName);
           if (!session.reused) {
             if (previousSessionId) {
               clearStarterSubmitState(previousSessionId);
@@ -4899,13 +4976,16 @@
           terminalSessionsByAgent.set(agent.id, session.sessionId);
           terminalAgentsBySession.set(session.sessionId, agent.id);
           activeTerminalSessionId = session.sessionId;
-          managedAgentByAgent.set(agent.id, agentName);
+          terminalProviderByAgent.set(agent.id, agentName);
           setRuntimeStatus(agent.id, 'running');
+          flushTerminalEvents(session.sessionId);
+          if (!terminalSessionsByAgent.has(agent.id)) return;
           updateLaunchOverlay();
           if (activeAgentId === agent.id) {
             mountTerminal(agent.id);
             view.terminal.focus();
           }
+          if (session.presentationNotice) showToast(session.presentationNotice);
           if (mode === 'resume') {
             await refreshConversationHistory();
             return;
@@ -4931,12 +5011,13 @@
             scheduleStarterInitialization(agent.id, session.sessionId, agentName, starterInitPrefix);
           }
         } catch (error) {
+          providerErrors.report(agent.id, agentName, mode === 'resume' ? 'resume' : 'launch', error.message || error);
           if (mode === 'resume') {
             showToast(`Could not resume conversation: ${error.message || error}`);
             refreshConversationHistory();
             return;
           }
-          managedAgentByAgent.delete(agent.id);
+          terminalProviderByAgent.delete(agent.id);
           activityByAgent.set(agent.id, { state: 'error', detail: `Could not start the agent: ${error.message || error}` });
           setRuntimeStatus(agent.id, 'stopped');
           updateLaunchOverlay();
@@ -5238,6 +5319,7 @@
       });
       settingsStartupToggle.addEventListener('click', toggleLaunchOnStartup);
       settingsChatContrast.addEventListener('change', changeChatContrast);
+      toolClutterToggle.addEventListener('click', changeToolClutter);
       applyChatBackground();
       settingsIgnoreAdd.addEventListener('click', addSettingsIgnore);
       settingsIgnoreInput.addEventListener('keydown', event => {
@@ -5260,6 +5342,7 @@
         catch (error) { showToast(`Could not end session: ${error.message || error}`); }
         finally { updateLaunchOverlay(); }
       });
+      document.getElementById('launch-terminal').addEventListener('click', () => launchAgentInTerminal('terminal'));
       launchClaudeButton.addEventListener('click', () => launchAgentInTerminal('claude'));
       launchClaudeSkipPermissionsButton.addEventListener('click', () => launchAgentInTerminal('claude', 'skip-permissions'));
       launchCodexButton.addEventListener('click', () => launchAgentInTerminal('codex'));
@@ -5389,7 +5472,7 @@
         cronSessionByAgent.delete(removedAgentId);
         cronRunBySession.delete(sessionId);
         syncAgentPowerState(removedAgentId, 'idle');
-        managedAgentByAgent.delete(removedAgentId);
+        terminalProviderByAgent.delete(removedAgentId);
         runtimeStatusByAgent.delete(removedAgentId);
         activityByAgent.delete(removedAgentId);
         cronSchedulesByAgent.delete(removedAgentId);
@@ -5464,17 +5547,17 @@
             activityByAgent.set(activity.agentId, activity);
             renderRuntimeStatus(activity.agentId);
           });
-          removeTerminalOutputListener = window.botlogik?.terminal?.onOutput?.(({ sessionId, data }) => {
+          removeTerminalOutputListener = window.botlogik?.terminal?.onOutput?.(handleOutputEvent = ({ sessionId, data }) => {
             const agentId = terminalAgentsBySession.get(sessionId);
-            if (!agentId) return;
+            if (!agentId) { holdTerminalEvent(sessionId, { type: 'output', payload: { sessionId, data: data.slice(-4000) } }); return; }
             handleTerminalOutput(agentId, data);
             const view = terminalView(agentId);
             const cleanData = view.stripFocusReportSequences(data);
             if (cleanData) view.terminal.write(cleanData);
           });
-          removeTerminalExitListener = window.botlogik?.terminal?.onExit?.(({ sessionId, code, signal }) => {
+          removeTerminalExitListener = window.botlogik?.terminal?.onExit?.(handleExitEvent = ({ sessionId, code, signal }) => {
             const agentId = terminalAgentsBySession.get(sessionId);
-            if (!agentId) return;
+            if (!agentId) { holdTerminalEvent(sessionId, { type: 'exit', payload: { sessionId, code, signal } }); return; }
             refreshConversationHistory();
             const wasCronRun = cronLaunchedSessions.has(sessionId);
             const cronRunId = cronRunBySession.get(sessionId);
@@ -5487,8 +5570,10 @@
             cronRunBySession.delete(sessionId);
             cronSessionByAgent.delete(agentId);
             renderScheduledRunBlocker(agentId);
-            managedAgentByAgent.delete(agentId);
+            const exitedProvider = terminalProviderByAgent.get(agentId) || 'Terminal agent';
+            terminalProviderByAgent.delete(agentId);
             if (signal || (code !== null && code !== undefined && code !== 0)) {
+              providerErrors.report(agentId, exitedProvider, 'exit', `The process exited unexpectedly. Signal: ${signal || 'none'}. Check the provider in Terminal for more details.`, code);
               activityByAgent.set(agentId, { ...activityByAgent.get(agentId), state: 'error', detail: `The agent exited unexpectedly (${signal || code}). Open its terminal for details.` });
             }
             setRuntimeStatus(agentId, 'stopped');
@@ -5616,7 +5701,33 @@
           appVersionLabel.textContent = `v${appVersion}`;
         }
       });
+      chatModelPicker = setupChatModels({ currentAgent: () => agentById(activeAgentId),
+        currentProvider: () => openRouterChat?.isOpen(activeAgentId) ? 'openrouter' : terminalProviderByAgent.get(activeAgentId),
+        isBlocked: () => hasActiveScheduledRun(activeAgentId),
+        focusTerminal: () => terminalView(activeAgentId).terminal.focus(), toast: showToast
+      });
+      toolTracesPanel = setupToolTraces({ currentAgent: () => agentById(activeAgentId),
+        currentContext: () => openRouterChat?.isOpen(activeAgentId)
+          ? { provider: 'openrouter', conversationId: openRouterChat.conversationId(activeAgentId) }
+          : { provider: terminalProviderByAgent.get(activeAgentId), conversationId: activityByAgent.get(activeAgentId)?.conversationId },
+        onResize: () => requestAnimationFrame(fitWorkspaceSurfaces)
+      });
+      providerErrors = setupProviderErrors({ currentAgent: () => activeAgentId,
+        viewTools: () => toolTracesPanel.showFailed(),
+        viewTerminal: () => {
+          if (openRouterChat?.isOpen(activeAgentId)) { showToast('End the OpenRouter session to view terminal output.'); return; }
+          setView('chat');
+          if (workspacePrefs.layout === 'editor') setWorkspaceLayout('split');
+          mountTerminal(activeAgentId);
+          agentLaunchOverlay.classList.add('hidden');
+          agentLaunchOverlay.classList.remove('flex');
+        },
+        returnToLaunch: () => updateLaunchOverlay()
+      });
       openRouterChat = setupOpenRouter({
+        reduceToolClutter: () => reduceToolClutter,
+        showTools: () => toolTracesPanel.show(),
+        onError: (agentId, message) => providerErrors.report(agentId, 'OpenRouter', 'request', message),
         currentAgent: () => agentById(activeAgentId),
         dirtyFiles: agentId => [...openDocuments.values()].filter(doc => doc.agentId === agentId && doc.dirty).map(doc => doc.file.relativePath || doc.file.path.slice((agentById(agentId)?.path.length || 0) + 1)),
         showSettings: () => document.getElementById('btn-settings').click(),

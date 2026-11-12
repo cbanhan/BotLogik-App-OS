@@ -1,5 +1,7 @@
+import { traceDetails } from '../shared/trace-details.js';
 // Installed under BotLogik's application data directory; no workspace/global CLI settings are edited.
-export const activityHookSource = String.raw`const http = require('node:http');
+export const activityHookSource = String.raw`const traceDetails = ${traceDetails.toString()};
+const http = require('node:http');
 let input = '';
 const timer = setTimeout(() => process.exit(0), 900);
 process.stdin.setEncoding('utf8');
@@ -19,6 +21,11 @@ process.stdin.on('end', () => {
       const value = event[key];
       if (typeof value === 'string') payload[key] = value.slice(0, 256);
       else if (typeof value === 'boolean') payload[key] = value;
+    }
+    if (['PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'PermissionRequest'].includes(payload.hook_event_name)) {
+      const result = event.tool_response;
+      if (result && typeof result === 'object') payload.tool_failed = result.is_error === true || result.success === false || Boolean(result.error) || (Number.isInteger(result.exit_code) && result.exit_code !== 0);
+      for (const key of ['tool_input', 'tool_response', 'error']) if (event[key] !== undefined) payload[key] = traceDetails(event[key]);
     }
     const body = JSON.stringify(payload);
     const request = http.request({ hostname: '127.0.0.1', port, path: '/activity', method: 'POST', headers: {

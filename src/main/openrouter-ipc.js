@@ -3,11 +3,13 @@ import { realpath } from 'node:fs/promises';
 import { findMentionFiles } from './openrouter-files.js';
 import { createOpenRouter } from './openrouter.js';
 
-export function registerOpenRouter({ ipcMain, BrowserWindow, safeStorage, shell, directory, getAgents, getIgnoredNames = async () => [], canStart, onActivity = () => {} }) {
+export function registerOpenRouter({ ipcMain, BrowserWindow, safeStorage, shell, directory, getAgents, getIgnoredNames = async () => [], canStart, onActivity = () => {}, onTrace = () => {} }) {
   const senders = new Map();
   const aliases = new Map();
   const bindings = new Map();
+  const workspaceAgents = new Map();
   const router = createOpenRouter({ directory: join(directory, 'openrouter'), safeStorage, getIgnoredNames,
+    onTrace(root, id, event) { onTrace({ agentId: workspaceAgents.get(root), provider: 'openrouter', id, conversationId: id }, event); },
     onChange(owner, chat) {
       const sender = senders.get(owner);
       if (sender && !sender.isDestroyed()) sender.send('openrouter:changed', chat);
@@ -28,6 +30,7 @@ export function registerOpenRouter({ ipcMain, BrowserWindow, safeStorage, shell,
     if (!agent) throw new Error('Select a connected workspace.');
     const root = await realpath(agent.path);
     aliases.set(agent.path, root);
+    workspaceAgents.set(root, agent.id);
     bindings.set(`${agent.id}:${agent.path}`, root);
     return root;
   }

@@ -148,6 +148,9 @@ app.whenReady().then(async () => {
   await wait(`!document.querySelector('.or-history').disabled`);
   await run(`document.querySelector('.or-options').open=true`);
   await click('.or-history');
+  await run(`workspaceTest.openrouterFailure()`);
+  await wait(`document.getElementById('provider-errors').textContent.includes('insufficient credits')`);
+  assert.equal(await run(`document.getElementById('provider-errors').hidden`),false);
   const currentChat = await run(`document.querySelector('.or-history').value`);
   await click('.or-history-row:not(.is-selected) [data-action="pin"]');
   await wait(`!document.querySelector('.or-history-search').disabled`);

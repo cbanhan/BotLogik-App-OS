@@ -1,9 +1,9 @@
-# Contributing
+# Forks and contributions
 
-Fork the repository, create a focused branch, and follow README.md to install and run the app. Describe the problem, resulting behavior, and validation in your pull request.
+BotLogik is maintained by its owner and is not accepting external code contributions or pull requests. Unsolicited pull requests may be closed without review.
 
-Run `npm test` and `npm run build`. For workspace or OpenRouter UI changes, also run the matching smoke test documented in README.md. These smoke tests use isolated fixtures; do not use real API keys or private projects in test data.
+If you want to change the app, fork this repository and maintain the changes in your own instance. Follow README.md to install, run, test, and package your fork. Forks remain subject to the MIT license and its notice requirements; the license does not grant rights to BotLogik branding or imply official endorsement.
 
-Keep source, assets, and tests self-contained. Do not submit generated packages, dependency folders, signing identities, credentials, local logs, conversations, or screenshots showing private information. Review `git diff --cached` before committing. An ignore rule does not remove an already tracked file.
+Do not include credentials, signing identities, private conversations, or generated release artifacts in your fork. Official signing and update infrastructure are not provided for forks.
 
-Source contributions are made under this repository's MIT license. Dependency code and assets retain their original licenses; include required attribution for anything added.
+For security vulnerabilities, follow [SECURITY.md](SECURITY.md).

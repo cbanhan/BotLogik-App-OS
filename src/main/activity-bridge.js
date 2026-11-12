@@ -35,7 +35,7 @@ export function activityHookArgs(provider, command) {
   return [];
 }
 
-export function createActivityBridge({ directory, executable = process.execPath, onChange = () => {},
+export function createActivityBridge({ directory, executable = process.execPath, onChange = () => {}, onTrace = () => {},
   getVersion = async (provider, env) => (await execFileAsync(provider, ['--version'], { env, timeout: 2500, maxBuffer: 8192 })).stdout,
   platform = process.platform } = {}) {
   const records = new Map();
@@ -60,14 +60,16 @@ export function createActivityBridge({ directory, executable = process.execPath,
         request.setEncoding('utf8');
         request.on('data', chunk => {
           body += chunk;
-          if (body.length > 8192) request.destroy();
+          if (body.length > 32768) request.destroy();
         });
         request.on('error', () => {});
         request.on('end', () => {
           try {
             // Recheck after reading: the session may have been replaced in the meantime.
             if (records.get(token) !== record) { response.writeHead(410).end(); return; }
-            record.accept(JSON.parse(body));
+            const event = JSON.parse(body);
+            record.accept(event);
+            if (!event.agent_id && !event.isSidechain && (!event.session_id || !record.conversationId || event.session_id === record.conversationId)) onTrace(record.snapshot(), event);
             response.writeHead(204).end();
           } catch { response.writeHead(400).end(); }
         });
@@ -94,11 +96,14 @@ export function createActivityBridge({ directory, executable = process.execPath,
         dispose(code, signal, intentional = false) {
           if (token) records.delete(token);
           activity.exit(code, signal, intentional);
+          onTrace(activity.snapshot(), { hook_event_name: 'BotLogikSessionClosed' });
         } };
       try {
         const version = await getVersion(provider, env);
+        result.version = version;
         if (platform === 'win32' || !supportsActivityHooks(provider, version)) {
           activity.detail = 'Session open. Detailed activity is unavailable for this CLI version or platform.';
+          onTrace(activity.snapshot(), { hook_event_name: 'BotLogikSessionStarted' });
           return result;
         }
         const port = await start();
@@ -113,6 +118,7 @@ export function createActivityBridge({ directory, executable = process.execPath,
         if (token) records.delete(token);
         activity.detail = 'Session open. Detailed activity monitoring could not start; terminal controls remain available.';
       }
+      onTrace(activity.snapshot(), { hook_event_name: 'BotLogikSessionStarted' });
       return result;
     },
     async close() {

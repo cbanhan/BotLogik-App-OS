@@ -2,6 +2,21 @@ import { clipboard, contextBridge, ipcRenderer, webUtils } from 'electron';
 
 contextBridge.exposeInMainWorld('botlogik', {
   platform: process.platform,
+  chatModels: {
+    get: request => ipcRenderer.invoke('chat-models:get', request),
+    catalog: request => ipcRenderer.invoke('chat-models:catalog', request),
+    save: request => ipcRenderer.invoke('chat-models:save', request),
+    prepare: request => ipcRenderer.invoke('chat-models:prepare', request)
+  },
+  traces: {
+    list: request => ipcRenderer.invoke('traces:list', request),
+    clear: request => ipcRenderer.invoke('traces:clear', request),
+    onChanged: callback => {
+      const listener = () => callback();
+      ipcRenderer.on('traces:changed', listener);
+      return () => ipcRenderer.removeListener('traces:changed', listener);
+    }
+  },
   openrouter: {
     openLink: url => ipcRenderer.invoke('openrouter:openLink', url),
     pin: request => ipcRenderer.invoke('openrouter:pin', request),
@@ -51,6 +66,7 @@ contextBridge.exposeInMainWorld('botlogik', {
   },
   settings: {
     get: () => ipcRenderer.invoke('settings:get'),
+    saveReduceToolClutter: value => ipcRenderer.invoke('settings:save-reduce-tool-clutter', value),
     saveChatContrast: (value) => ipcRenderer.invoke('settings:save-chat-contrast', value),
     saveGlobalIgnoredNames: (names) => ipcRenderer.invoke('settings:save-global-ignored-names', names),
     saveLaunchOnStartup: (enabled) => ipcRenderer.invoke('settings:save-launch-on-startup', enabled)

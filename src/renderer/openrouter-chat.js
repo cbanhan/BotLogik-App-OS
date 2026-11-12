@@ -1,10 +1,11 @@
+import { toolWorkingLabel, toolResultState, toolGroupSummary } from './tool-presentation.js';
 import './openrouter.css';
 import { setupHistoryPicker } from './openrouter-history-picker';
 import { renderMarkdown } from './openrouter-markdown';
 import { setupFileMentions } from './openrouter-mentions';
 import { setupModelPicker } from './openrouter-model-picker';
 
-export function setupOpenRouter({ currentAgent, showSettings, dirtyFiles = () => [], onVisibility = () => {}, onActivity = () => {} }) {
+export function setupOpenRouter({ currentAgent, showSettings, dirtyFiles = () => [], onVisibility = () => {}, onActivity = () => {}, onError = () => {}, reduceToolClutter = () => false, showTools = () => {} }) {
   const api = window.botlogik?.openrouter;
   const panel = document.createElement('section');
   panel.id = 'openrouter-chat'; panel.className = 'or-panel'; panel.hidden = true;
@@ -27,7 +28,7 @@ export function setupOpenRouter({ currentAgent, showSettings, dirtyFiles = () =>
       <div class="or-compose-actions"><label>Max requests per turn <input class="or-limit" type="number" min="1" max="30" value="12"></label><span class="or-usage"></span><button type="button" data-action="stop" hidden>Stop</button><button type="submit" class="or-send">Send</button></div>
       <p class="or-help">Messages and tool results go to OpenRouter and the selected provider. Edits and commands ask for approval. Conversations are saved on this Mac.</p>
     </form>`;
-  document.getElementById('pane-chat').append(panel);
+  document.getElementById('conversation-surface').append(panel);
   const $ = sel => panel.querySelector(sel);
   const history = $('.or-history'), model = $('.or-model'), messages = $('.or-messages'), prompt = $('#or-prompt'), status = $('.or-status');
   const picker = setupModelPicker(model);
@@ -48,6 +49,9 @@ export function setupOpenRouter({ currentAgent, showSettings, dirtyFiles = () =>
     $('.or-price').textContent = chosen ? `Per 1M tokens: ${price(chosen.inputPrice)} input · ${price(chosen.outputPrice)} output. Provider charges may vary.` : 'Select a tool-capable model. Your OpenRouter account pays for usage.';
   }
   function render(s) {
+    const failure = s.error || s.chat?.error || '';
+    if (failure && failure !== s.reportedError) onError(s.agent.id, failure);
+    s.reportedError = failure;
     if (shown !== s) return;
     mentions.render();
     historyPicker.select(s.chat?.id || '');
@@ -64,15 +68,18 @@ export function setupOpenRouter({ currentAgent, showSettings, dirtyFiles = () =>
     $('.or-send').disabled = busy || s.loading || locked || !model.value || (!chat && !catalogue.some(m => m.id === model.value));
     $('[data-action="stop"]').hidden = !busy;
     $('.or-limit').disabled = busy;
-    status.textContent = s.error || (chat?.pending ? 'Waiting for your approval' : busy ? 'Working…' : chat?.notice || 'Ready');
+    status.textContent = s.error || (chat?.pending ? 'Waiting for your approval' : busy ? (reduceToolClutter() ? toolWorkingLabel(chat?.activeTool) : 'Working…') : chat?.notice || 'Ready');
     const usage = chat?.usage;
     $('.or-usage').textContent = usage ? `${usage.requests} requests · ${usage.tokens.toLocaleString()} tokens${usage.costReported ? ` · $${usage.cost.toFixed(4)} reported` : ''}` : '';
     const nearBottom = messages.scrollHeight - messages.scrollTop - messages.clientHeight < 90;
     messages.replaceChildren();
     if (!chat?.messages.length) messages.append(node('p', 'Build in this workspace with your choice of model. BotLogik can read files, search, propose edits, and run commands.', 'or-empty'));
-    for (const message of chat?.messages || []) {
+    const compact = reduceToolClutter();
+    for (const [index, message] of (chat?.messages || []).entries()) {
       if (message.role === 'tool') {
-        const detail = node('details', '', 'or-tool'); detail.append(node('summary', 'Tool result'), node('pre', message.content)); messages.append(detail); continue;
+        const resultState = toolResultState(message.content);
+        if (compact && resultState === 'completed') continue;
+        const detail = node('details', '', 'or-tool'); detail.append(node('summary', compact ? (resultState === 'failed' ? 'Tool failed — details' : resultState === 'denied' ? 'Tool declined — details' : 'Tool result unavailable — details') : 'Tool result'), node('pre', message.content)); messages.append(detail); continue;
       }
       const item = node('article', '', `or-message or-${message.role}`);
       item.append(node('strong', message.role === 'user' ? 'You' : chat.model));
@@ -88,7 +95,16 @@ export function setupOpenRouter({ currentAgent, showSettings, dirtyFiles = () =>
         const detail = node('details', '', 'or-tool or-attached-file');
         detail.append(node('summary', `${file.path} · saved snapshot`), node('pre', file.content)); item.append(detail);
       }
-      for (const call of message.tool_calls || []) {
+      if (compact && message.tool_calls?.length) {
+        const summary = node('div', '', 'or-tool-summary');
+        let label = toolGroupSummary(chat.messages, index, busy, chat.activeTool);
+        if (chat.pending && label.endsWith('…')) label = 'Waiting for approval';
+        if (label.endsWith('…')) { const spinner = node('span', '', 'or-tool-spinner'); spinner.setAttribute('aria-hidden', 'true'); summary.append(spinner); }
+        summary.append(node('span', label));
+        const details = node('button', 'View tools'); details.type = 'button'; details.onclick = showTools; summary.append(details);
+        item.append(summary);
+      }
+      for (const call of compact ? [] : message.tool_calls || []) {
         const detail = node('details', '', 'or-tool'); detail.append(node('summary', call.function.name), node('pre', call.function.arguments)); item.append(detail);
       }
       messages.append(item);
@@ -277,6 +293,6 @@ export function setupOpenRouter({ currentAgent, showSettings, dirtyFiles = () =>
   settings.querySelector('[data-key="save"]').onclick = () => keyAction('save');
   settings.querySelector('[data-key="remove"]').onclick = () => keyAction('remove');
   if (api) keyAction('status');
-  return { sync, launch, refreshMentions: () => mentions.render(), get busy() { return [...states.values()].some(s => s.chat?.busy || s.sending); }, isOpen: id => states.get(id)?.open, isBusy: id => Boolean(states.get(id)?.chat?.busy || states.get(id)?.sending),
+  return { sync, launch, refreshPresentation: () => { if (shown) render(shown); }, conversationId: id => states.get(id)?.chat?.id, refreshMentions: () => mentions.render(), get busy() { return [...states.values()].some(s => s.chat?.busy || s.sending); }, isOpen: id => states.get(id)?.open, isBusy: id => Boolean(states.get(id)?.chat?.busy || states.get(id)?.sending),
     async close(agent) { const s = states.get(agent?.id); if (!s) return; s.cancelRequested = true; if (api && (s.chat?.busy || s.sending)) await api.stop(request(s)); s.open = false; sync(currentAgent()); onVisibility(); } };
 }

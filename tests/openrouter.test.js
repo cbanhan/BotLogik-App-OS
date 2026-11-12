@@ -108,6 +108,7 @@ test('aborting network requests leaves a reusable conversation; HTTP errors do n
   f.replies.push({ ok: false, status: 402, json: async () => ({ error: token }) });
   await f.router.send(f.root, 1, { id: chat.id, text: 'Retry' });
   assert.match((await f.router.get(f.root, chat.id)).notice, /credits/);
+  assert.match((await f.router.get(f.root, chat.id)).error, /credits/);
   assert.equal(JSON.stringify(f.events).includes(token), false);
 });
 
@@ -256,4 +257,16 @@ test('active runs cannot be purged, deleted, or pinned during a save', async t =
   assert.equal((await f.router.get(f.root, chat.id)).busy, true);
   await f.router.stop(f.root, 1); await running;
   assert.equal((await f.router.list(f.root)).length, 1);
+});
+
+
+test('tool tracing observes real execution and approval without recording prompts', async t => {
+  const traces = [];
+  const f = await fixture(t, { onTrace: (root, id, event) => traces.push({ root, id, ...event }) });
+  const chat = await f.router.create(f.root, MODEL.id);
+  f.replies.push(completion(null, [tool('read_file', { path: 'missing.txt' })]), completion('Done'));
+  await f.router.send(f.root, 1, { id: chat.id, text: 'private user request' });
+  assert.deepEqual(traces.map(e => e.hook_event_name), ['UserPromptSubmit', 'PreToolUse', 'PostToolUseFailure', 'Stop']);
+  assert.ok(traces.every(e => e.id === chat.id));
+  assert.ok(!JSON.stringify(traces).includes('private user request'));
 });
